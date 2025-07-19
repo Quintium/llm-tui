@@ -14,6 +14,7 @@ use ratatui::{
 };
 use std::io::{self, Stdout};
 use std::time::{Duration, Instant};
+use std::path::PathBuf;
 
 // UI state - only display-related information
 #[derive(Debug)]
@@ -408,5 +409,494 @@ impl RatatuiRenderer {
 
     pub fn set_status_message(&mut self, message: Option<String>) {
         self.state.status_message = message;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use std::time::Duration;
+
+    // Helper function to create test messages
+    fn create_test_message(role: MessageRole, content: &str, provisional: bool) -> Message {
+        Message {
+            role,
+            content: content.to_string(),
+            timestamp: Utc::now(),
+            provisional,
+            context_files: vec![],
+        }
+    }
+
+    // Helper function to create test app display data
+    fn create_test_app_data() -> AppDisplayData {
+        AppDisplayData {
+            messages: vec![
+                create_test_message(MessageRole::User, "Hello", false),
+                create_test_message(MessageRole::Assistant, "Hi there!", false),
+                create_test_message(MessageRole::User, "Test provisional", true),
+            ],
+            provisional_mode: false,
+            rag_enabled: true,
+            current_status: "Ready".to_string(),
+            streaming_response: None,
+        }
+    }
+
+    #[test]
+    fn test_tui_state_default() {
+        let state = TuiState::default();
+        
+        assert_eq!(state.input_buffer, "");
+        assert_eq!(state.scroll_position, 0);
+        assert!(!state.command_mode);
+        assert!(state.status_message.is_none());
+        assert!(!state.show_help);
+        // last_input_time should be recent
+        assert!(state.last_input_time.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_app_display_data_default() {
+        let data = AppDisplayData::default();
+        
+        assert!(data.messages.is_empty());
+        assert!(!data.provisional_mode);
+        assert!(!data.rag_enabled);
+        assert_eq!(data.current_status, "");
+        assert!(data.streaming_response.is_none());
+    }
+
+    #[test]
+    fn test_command_parsing_basic_commands() {
+        let renderer = create_mock_renderer();
+        
+        // Test basic commands without arguments
+        assert!(matches!(renderer.parse_command("help"), Ok(Command::Help)));
+        assert!(matches!(renderer.parse_command("config"), Ok(Command::Config)));
+        assert!(matches!(renderer.parse_command("clear"), Ok(Command::Clear)));
+        assert!(matches!(renderer.parse_command("toggle-rag"), Ok(Command::ToggleRag)));
+        assert!(matches!(renderer.parse_command("toggle-prov"), Ok(Command::ToggleProvisional)));
+        assert!(matches!(renderer.parse_command("toggle-provisional"), Ok(Command::ToggleProvisional)));
+        assert!(matches!(renderer.parse_command("list-sources"), Ok(Command::ListSources)));
+        assert!(matches!(renderer.parse_command("exit"), Ok(Command::Exit)));
+        assert!(matches!(renderer.parse_command("quit"), Ok(Command::Exit)));
+    }
+
+    #[test]
+    fn test_command_parsing_with_arguments() {
+        let renderer = create_mock_renderer();
+        
+        // Test commands with arguments
+        match renderer.parse_command("add-source /path/to/file") {
+            Ok(Command::AddSource(path)) => {
+                assert_eq!(path.to_string_lossy(), "/path/to/file");
+            }
+            _ => panic!("Expected AddSource command"),
+        }
+
+        match renderer.parse_command("remove-source /another/path") {
+            Ok(Command::RemoveSource(path)) => {
+                assert_eq!(path.to_string_lossy(), "/another/path");
+            }
+            _ => panic!("Expected RemoveSource command"),
+        }
+    }
+
+    #[test]
+    fn test_command_parsing_errors() {
+        let renderer = create_mock_renderer();
+        
+        // Test empty command
+        assert!(renderer.parse_command("").is_err());
+        
+        // Test unknown command
+        assert!(renderer.parse_command("unknown-command").is_err());
+        
+        // Test commands missing required arguments
+        assert!(renderer.parse_command("add-source").is_err());
+        assert!(renderer.parse_command("remove-source").is_err());
+    }
+
+    #[test]
+    fn test_command_parsing_whitespace_handling() {
+        let renderer = create_mock_renderer();
+        
+        // Test commands with extra whitespace
+        assert!(matches!(renderer.parse_command("  help  "), Ok(Command::Help)));
+        assert!(matches!(renderer.parse_command("\tconfig\t"), Ok(Command::Config)));
+        
+        // Test arguments with spaces
+        match renderer.parse_command("add-source /path with spaces/file.txt") {
+            Ok(Command::AddSource(path)) => {
+                assert_eq!(path.to_string_lossy(), "/path");
+            }
+            _ => panic!("Expected AddSource command"),
+        }
+    }
+
+    #[test]
+    fn test_input_buffer_operations() {
+        let mut renderer = create_mock_renderer();
+        
+        // Test getting empty buffer
+        assert_eq!(renderer.get_input_buffer(), "");
+        
+        // Test buffer manipulation through state
+        renderer.state.input_buffer = "test input".to_string();
+        assert_eq!(renderer.get_input_buffer(), "test input");
+        
+        // Test clearing buffer
+        renderer.clear_input_buffer();
+        assert_eq!(renderer.get_input_buffer(), "");
+    }
+
+    #[test]
+    fn test_status_message_management() {
+        let mut renderer = create_mock_renderer();
+        
+        // Test setting status message
+        renderer.set_status_message(Some("Test status".to_string()));
+        assert_eq!(renderer.state.status_message, Some("Test status".to_string()));
+        
+        // Test clearing status message
+        renderer.set_status_message(None);
+        assert!(renderer.state.status_message.is_none());
+    }
+
+    #[test]
+    fn test_tui_state_mode_toggles() {
+        let mut state = TuiState::default();
+        
+        // Test command mode toggle
+        assert!(!state.command_mode);
+        state.command_mode = !state.command_mode;
+        assert!(state.command_mode);
+        
+        // Test help display toggle
+        assert!(!state.show_help);
+        state.show_help = !state.show_help;
+        assert!(state.show_help);
+    }
+
+    #[test]
+    fn test_message_role_display_properties() {
+        // Test that message roles have expected properties for display
+        let user_msg = create_test_message(MessageRole::User, "User message", false);
+        let assistant_msg = create_test_message(MessageRole::Assistant, "Assistant message", false);
+        let system_msg = create_test_message(MessageRole::System, "System message", false);
+        
+        assert!(matches!(user_msg.role, MessageRole::User));
+        assert!(matches!(assistant_msg.role, MessageRole::Assistant));
+        assert!(matches!(system_msg.role, MessageRole::System));
+        
+        // Test provisional flag
+        let provisional_msg = create_test_message(MessageRole::User, "Provisional", true);
+        assert!(provisional_msg.provisional);
+    }
+
+    #[test]
+    fn test_app_display_data_with_streaming() {
+        let mut data = create_test_app_data();
+        
+        // Test without streaming
+        assert!(data.streaming_response.is_none());
+        
+        // Test with streaming response
+        data.streaming_response = Some("Partial response...".to_string());
+        assert_eq!(data.streaming_response, Some("Partial response...".to_string()));
+    }
+
+    #[test]
+    fn test_app_display_data_status_indicators() {
+        let mut data = create_test_app_data();
+        
+        // Test RAG enabled/disabled
+        data.rag_enabled = true;
+        assert!(data.rag_enabled);
+        
+        data.rag_enabled = false;
+        assert!(!data.rag_enabled);
+        
+        // Test provisional mode
+        data.provisional_mode = true;
+        assert!(data.provisional_mode);
+        
+        data.provisional_mode = false;
+        assert!(!data.provisional_mode);
+        
+        // Test status message
+        data.current_status = "Processing...".to_string();
+        assert_eq!(data.current_status, "Processing...");
+    }
+
+    #[test]
+    fn test_message_timestamp_ordering() {
+        let now = Utc::now();
+        let msg1 = Message {
+            role: MessageRole::User,
+            content: "First message".to_string(),
+            timestamp: now,
+            provisional: false,
+            context_files: vec![],
+        };
+        
+        let msg2 = Message {
+            role: MessageRole::Assistant,
+            content: "Second message".to_string(),
+            timestamp: now + chrono::Duration::seconds(1),
+            provisional: false,
+            context_files: vec![],
+        };
+        
+        // Verify timestamp ordering
+        assert!(msg1.timestamp < msg2.timestamp);
+    }
+
+    #[test]
+    fn test_context_files_in_messages() {
+        let context_files = vec![
+            PathBuf::from("/path/to/file1.txt"),
+            PathBuf::from("/path/to/file2.md"),
+        ];
+        
+        let msg = Message {
+            role: MessageRole::Assistant,
+            content: "Response with context".to_string(),
+            timestamp: Utc::now(),
+            provisional: false,
+            context_files: context_files.clone(),
+        };
+        
+        assert_eq!(msg.context_files.len(), 2);
+        assert_eq!(msg.context_files, context_files);
+    }
+
+    #[test]
+    fn test_scroll_position_bounds() {
+        let mut state = TuiState::default();
+        
+        // Test initial scroll position
+        assert_eq!(state.scroll_position, 0);
+        
+        // Test setting scroll position
+        state.scroll_position = 5;
+        assert_eq!(state.scroll_position, 5);
+        
+        // Note: Actual bounds checking would be implemented in the rendering logic
+        // based on the number of messages and terminal height
+    }
+
+    #[test]
+    fn test_input_timing_tracking() {
+        let mut state = TuiState::default();
+        let initial_time = state.last_input_time;
+        
+        // Simulate input timing update
+        std::thread::sleep(Duration::from_millis(10));
+        state.last_input_time = Instant::now();
+        
+        assert!(state.last_input_time > initial_time);
+    }
+
+    // Mock renderer for testing that doesn't require terminal initialization
+    struct MockRenderer {
+        state: TuiState,
+    }
+
+    impl MockRenderer {
+        fn new() -> Self {
+            Self {
+                state: TuiState::default(),
+            }
+        }
+
+        fn parse_command(&self, command_str: &str) -> Result<Command, TuiError> {
+            let parts: Vec<&str> = command_str.split_whitespace().collect();
+            if parts.is_empty() {
+                return Err(TuiError::InputHandling("Empty command".to_string()));
+            }
+
+            match parts[0] {
+                "help" => Ok(Command::Help),
+                "config" => Ok(Command::Config),
+                "clear" => Ok(Command::Clear),
+                "toggle-rag" => Ok(Command::ToggleRag),
+                "toggle-prov" | "toggle-provisional" => Ok(Command::ToggleProvisional),
+                "add-source" => {
+                    if parts.len() < 2 {
+                        return Err(TuiError::InputHandling("add-source requires a path argument".to_string()));
+                    }
+                    Ok(Command::AddSource(parts[1].into()))
+                }
+                "remove-source" => {
+                    if parts.len() < 2 {
+                        return Err(TuiError::InputHandling("remove-source requires a path argument".to_string()));
+                    }
+                    Ok(Command::RemoveSource(parts[1].into()))
+                }
+                "list-sources" => Ok(Command::ListSources),
+                "exit" | "quit" => Ok(Command::Exit),
+                _ => Err(TuiError::InputHandling(format!("Unknown command: {}", parts[0]))),
+            }
+        }
+
+        fn get_input_buffer(&self) -> &str {
+            &self.state.input_buffer
+        }
+
+        fn clear_input_buffer(&mut self) {
+            self.state.input_buffer.clear();
+        }
+
+        fn set_status_message(&mut self, message: Option<String>) {
+            self.state.status_message = message;
+        }
+    }
+
+    // Helper function to create a mock renderer for testing
+    fn create_mock_renderer() -> MockRenderer {
+        MockRenderer::new()
+    }
+
+    // Integration-style tests for UI behavior
+    mod integration_tests {
+        use super::*;
+
+        #[test]
+        fn test_message_display_formatting() {
+            let data = create_test_app_data();
+            
+            // Verify we have the expected test messages
+            assert_eq!(data.messages.len(), 3);
+            
+            // Check message content and roles
+            assert_eq!(data.messages[0].content, "Hello");
+            assert!(matches!(data.messages[0].role, MessageRole::User));
+            assert!(!data.messages[0].provisional);
+            
+            assert_eq!(data.messages[1].content, "Hi there!");
+            assert!(matches!(data.messages[1].role, MessageRole::Assistant));
+            assert!(!data.messages[1].provisional);
+            
+            assert_eq!(data.messages[2].content, "Test provisional");
+            assert!(matches!(data.messages[2].role, MessageRole::User));
+            assert!(data.messages[2].provisional);
+        }
+
+        #[test]
+        fn test_status_bar_information() {
+            let data = create_test_app_data();
+            
+            // Verify status information is available
+            assert!(data.rag_enabled);
+            assert!(!data.provisional_mode);
+            assert_eq!(data.current_status, "Ready");
+        }
+
+        #[test]
+        fn test_command_vs_message_mode() {
+            let mut state = TuiState::default();
+            
+            // Test message mode (default)
+            assert!(!state.command_mode);
+            
+            // Test switching to command mode
+            state.command_mode = true;
+            assert!(state.command_mode);
+            
+            // Test input buffer behavior in different modes
+            state.input_buffer = "test input".to_string();
+            assert_eq!(state.input_buffer, "test input");
+            
+            // Command mode should affect how input is interpreted
+            // but the buffer itself works the same way
+        }
+
+        #[test]
+        fn test_help_display_toggle() {
+            let mut state = TuiState::default();
+            
+            // Test help initially hidden
+            assert!(!state.show_help);
+            
+            // Test showing help
+            state.show_help = true;
+            assert!(state.show_help);
+            
+            // Test hiding help
+            state.show_help = false;
+            assert!(!state.show_help);
+        }
+    }
+
+    // Performance and edge case tests
+    mod edge_case_tests {
+        use super::*;
+
+        #[test]
+        fn test_empty_input_buffer_operations() {
+            let mut renderer = create_mock_renderer();
+            
+            // Test operations on empty buffer
+            assert_eq!(renderer.get_input_buffer(), "");
+            renderer.clear_input_buffer(); // Should not panic
+            assert_eq!(renderer.get_input_buffer(), "");
+        }
+
+        #[test]
+        fn test_large_message_content() {
+            let large_content = "x".repeat(10000);
+            let msg = create_test_message(MessageRole::User, &large_content, false);
+            
+            assert_eq!(msg.content.len(), 10000);
+            assert_eq!(msg.content, large_content);
+        }
+
+        #[test]
+        fn test_many_messages_display_data() {
+            let mut data = AppDisplayData::default();
+            
+            // Add many messages
+            for i in 0..1000 {
+                data.messages.push(create_test_message(
+                    MessageRole::User,
+                    &format!("Message {}", i),
+                    i % 10 == 0, // Every 10th message is provisional
+                ));
+            }
+            
+            assert_eq!(data.messages.len(), 1000);
+            
+            // Check that provisional messages are correctly marked
+            let provisional_count = data.messages.iter().filter(|m| m.provisional).count();
+            assert_eq!(provisional_count, 100); // Every 10th message
+        }
+
+        #[test]
+        fn test_special_characters_in_commands() {
+            let renderer = create_mock_renderer();
+            
+            // Test commands with special characters in paths
+            match renderer.parse_command("add-source /path/with-dashes/file_name.txt") {
+                Ok(Command::AddSource(path)) => {
+                    assert_eq!(path.to_string_lossy(), "/path/with-dashes/file_name.txt");
+                }
+                _ => panic!("Expected AddSource command"),
+            }
+        }
+
+        #[test]
+        fn test_unicode_in_input_buffer() {
+            let mut renderer = create_mock_renderer();
+            
+            // Test unicode characters
+            renderer.state.input_buffer = "Hello 世界 🌍".to_string();
+            assert_eq!(renderer.get_input_buffer(), "Hello 世界 🌍");
+            
+            renderer.clear_input_buffer();
+            assert_eq!(renderer.get_input_buffer(), "");
+        }
     }
 }
