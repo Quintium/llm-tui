@@ -1,7 +1,6 @@
 use llm_tui_assistant::app::AppController;
 use llm_tui_assistant::types::*;
 use llm_tui_assistant::ui::{RatatuiRenderer, TuiRenderer};
-use std::io;
 use tracing::{error, info};
 
 #[tokio::main]
@@ -16,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(app) => app,
         Err(e) => {
             error!("Failed to initialize application: {}", e);
-            return Err(Box::new(e));
+            return Err(e.into());
         }
     };
 
@@ -25,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(renderer) => renderer,
         Err(e) => {
             error!("Failed to initialize TUI: {}", e);
-            return Err(Box::new(e));
+            return Err(e.into());
         }
     };
 

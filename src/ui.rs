@@ -1,5 +1,4 @@
 use crate::types::*;
-use std::io;
 
 // UI state - only display-related information
 #[derive(Debug, Default)]
