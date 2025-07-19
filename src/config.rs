@@ -646,7 +646,9 @@ mod tests {
         
         let result = ConfigManager::new();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to parse config file"));
+
+        let err = result.map(|_| "Expected error, got ok").unwrap_err();
+        assert!(err.to_string().contains("Failed to parse config file"));
         
         std::env::remove_var("XDG_CONFIG_HOME");
     }
